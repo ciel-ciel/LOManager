@@ -17,6 +17,9 @@ struct LOChecklistSheet: View {
     // ★ 手動退店フラグ
     @State private var isCheckedOut: Bool
 
+    // ★ 追加：削除確認
+    @State private var showDeleteConfirm = false
+
     let reservation: ReservationEntity
     var onSaved: (ReservationEntity) -> Void = { _ in }
 
@@ -90,6 +93,18 @@ struct LOChecklistSheet: View {
                     Text(reservation.note.isEmpty ? "メモなし" : reservation.note)
                         .foregroundStyle(.secondary)
                 }
+
+                // ★ 追加：消去（削除）
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("この予約を消去")
+                        }
+                    }
+                }
             }
             .navigationTitle("LOチェック")
             .navigationBarTitleDisplayMode(.inline)
@@ -100,6 +115,18 @@ struct LOChecklistSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") { save() }
                 }
+            }
+            .confirmationDialog(
+                "この予約を削除しますか？",
+                isPresented: $showDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("削除する", role: .destructive) {
+                    deleteReservation()
+                }
+                Button("キャンセル", role: .cancel) {}
+            } message: {
+                Text("削除すると元に戻せません。")
             }
         }
     }
@@ -171,6 +198,16 @@ struct LOChecklistSheet: View {
         catch { print("LO 状態の保存に失敗: \(error)") }
 
         onSaved(reservation)
+        dismiss()
+    }
+
+    private func deleteReservation() {
+        context.delete(reservation)
+        do {
+            try context.save()
+        } catch {
+            print("予約の削除に失敗: \(error)")
+        }
         dismiss()
     }
 }

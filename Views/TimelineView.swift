@@ -2,6 +2,10 @@ import SwiftUI
 import SwiftData
 import Combine
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 /// 横軸=時間, 縦軸=卓 のタイムラインビュー（レストランボード風）
 struct TimelineView: View {
     @Environment(\.modelContext) private var context
@@ -25,7 +29,10 @@ struct TimelineView: View {
     // ドラッグ中のバー見た目用
     @State private var draggingReservationId: UUID?
     @State private var dragOffsetX: CGFloat = 0
-    @State private var dragOffsetY: CGFloat = 0   // 縦方向のオフセット
+    @State private var dragOffsetY: CGFloat = 0
+
+    // 誤操作防止：長押ししてからでないと席移動できない
+    @State private var moveArmedReservationId: UUID?
 
     private let openHour = 17
     private let closeHour = 23
@@ -33,6 +40,9 @@ struct TimelineView: View {
 
     // バーの太さ
     private let rowHeight: CGFloat = 56
+
+    // 左の卓カラム幅
+    private let leftColumnWidth: CGFloat = 80
 
     private enum NextLOKind {
         case donabe, food, drink
@@ -61,32 +71,36 @@ struct TimelineView: View {
             )
             .ignoresSafeArea()
 
-            ScrollView([.horizontal, .vertical]) {
-                // 縦方向の spacing を 0 に
-                VStack(alignment: .leading, spacing: 0) {
-                    DatePicker(
-                        "日付",
-                        selection: $selectedDate,
-                        displayedComponents: [.date]
-                    )
-                    .datePickerStyle(.compact)
+            VStack(alignment: .leading, spacing: 0) {
+                DatePicker(
+                    "日付",
+                    selection: $selectedDate,
+                    displayedComponents: [.date]
+                )
+                .datePickerStyle(.compact)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+
+                Text(dateText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
+                    .padding(.bottom, 2)
 
-                    headerRow
-                        .padding(.horizontal, 4)
-                        .padding(.bottom, 2)
-
-                    Text(dateText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.bottom, 2)
-
-                    ForEach(tables, id: \.id) { table in
-                        timelineRow(for: table)
+                // 縦スクロールだけ外側に持たせる
+                ScrollView(.vertical) {
+                    HStack(alignment: .top, spacing: 0) {
+                        // 左カラムは固定表示
+                        leftColumn
                             .padding(.horizontal, 4)
+
+                        // 右だけ横スクロール
+                        ScrollView(.horizontal) {
+                            rightTimeline
+                                .padding(.horizontal, 4)
+                        }
                     }
+                    .padding(.vertical, 2)
 
                     if tables.isEmpty {
                         Text("卓が登録されていません")
@@ -95,7 +109,6 @@ struct TimelineView: View {
                             .padding(.vertical, 2)
                     }
                 }
-                .padding(.vertical, 2)
             }
         }
         .navigationTitle("タイムライン")
@@ -116,15 +129,63 @@ struct TimelineView: View {
         }
     }
 
-    // MARK: - 時間ヘッダー
+    // MARK: - 左カラム
 
-    private var headerRow: some View {
-        HStack(alignment: .bottom, spacing: 0) {
+    private var leftColumn: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // ヘッダー左セル
             Text("卓 / 時間")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 80, alignment: .leading)
+                .frame(width: leftColumnWidth, alignment: .leading)
+                .padding(.bottom, 2)
 
+            ForEach(tables, id: \.id) { table in
+                leftRow(for: table)
+                    .frame(width: leftColumnWidth, height: rowHeight, alignment: .leading)
+                    .padding(.trailing, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selectedTableForAdd = table
+                        showingAddSheet = true
+                    }
+            }
+        }
+    }
+
+    private func leftRow(for table: TableEntity) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Text(table.name)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Image(systemName: "plus.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("タップでこの卓に追加")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - 右タイムライン
+
+    private var rightTimeline: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerHoursRow
+                .padding(.bottom, 2)
+
+            ForEach(tables, id: \.id) { table in
+                timelineBarsRow(for: table)
+                    .padding(.vertical, 0)
+            }
+        }
+    }
+
+    private var headerHoursRow: some View {
+        HStack(alignment: .bottom, spacing: 0) {
             ForEach(openHour..<closeHour, id: \.self) { hour in
                 VStack(spacing: 1) {
                     Text(String(format: "%02d:00", hour))
@@ -139,80 +200,45 @@ struct TimelineView: View {
         }
     }
 
-    // MARK: - 卓1行分
-
-    private func timelineRow(for table: TableEntity) -> some View {
+    private func timelineBarsRow(for table: TableEntity) -> some View {
         let tableReservations = reservationsForSelectedDate.filter { $0.tableId == table.id }
 
-        return HStack(alignment: .center, spacing: 0) {
-            // 左側：卓名 + 「タップでこの卓に追加」
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(table.name)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    Image(systemName: "plus.circle")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+        return ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.ultraThinMaterial)
+                .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
+                .frame(height: rowHeight)
 
-                Text("タップでこの卓に追加")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(width: 80, alignment: .leading)
-            .padding(.trailing, 4)
-            // 🔸 卓名エリアのタップでも予約追加
-            .onTapGesture {
-                selectedTableForAdd = table
-                showingAddSheet = true
-            }
-
-            // 右側：タイムライングリッド + 予約バー
-            ZStack(alignment: .leading) {
-                // 背景 & シャドウ
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
-                    .frame(height: rowHeight)
-
-                // 時間グリッド
-                HStack(spacing: 0) {
-                    ForEach(openHour..<closeHour, id: \.self) { _ in
-                        Rectangle()
-                            .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
-                            .frame(width: hourWidth, height: rowHeight)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                // 現在時刻の縦線
-                if isNowInRange {
+            HStack(spacing: 0) {
+                ForEach(openHour..<closeHour, id: \.self) { _ in
                     Rectangle()
-                        .fill(Color.red.opacity(0.8))
-                        .frame(width: 2, height: rowHeight + 4)
-                        .offset(x: timeToPosition(now))
-                        .shadow(radius: 1)
-                }
-
-                // 予約バー
-                ForEach(tableReservations, id: \.id) { r in
-                    reservationBar(for: r)
-                        .onTapGesture {
-                            // 予約バータップ → LO チェック画面へ
-                            selectedReservationForLO = r
-                        }
+                        .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                        .frame(width: hourWidth, height: rowHeight)
                 }
             }
-            .frame(width: timelineWidth, height: rowHeight)
-            // 🔸 グリッド部分のタップでも予約追加（バーをタップした場合はバー側の onTap が優先）
-            .contentShape(Rectangle())
-            .onTapGesture {
-                selectedTableForAdd = table
-                showingAddSheet = true
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            if isNowInRange {
+                Rectangle()
+                    .fill(Color.red.opacity(0.8))
+                    .frame(width: 2, height: rowHeight + 4)
+                    .offset(x: timeToPosition(now))
+                    .shadow(radius: 1)
+            }
+
+            ForEach(tableReservations, id: \.id) { r in
+                reservationBar(for: r)
+                    .onTapGesture {
+                        selectedReservationForLO = r
+                    }
             }
         }
-        .padding(.vertical, 0)
+        .frame(width: timelineWidth, height: rowHeight)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedTableForAdd = table
+            showingAddSheet = true
+        }
     }
 
     // MARK: - 予約バー本体
@@ -286,21 +312,39 @@ struct TimelineView: View {
             y: isDragging ? dragOffsetY : 0
         )
         .animation(.spring(response: 0.18, dampingFraction: 0.85), value: isDragging)
-        .gesture(
+
+        .highPriorityGesture(
+            LongPressGesture(minimumDuration: 0.35)
+                .onEnded { _ in
+                    moveArmedReservationId = r.id
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    #endif
+                }
+        )
+        .simultaneousGesture(
             DragGesture()
                 .onChanged { value in
+                    guard moveArmedReservationId == r.id else { return }
                     draggingReservationId = r.id
                     dragOffsetX = value.translation.width
                     dragOffsetY = value.translation.height
                 }
                 .onEnded { value in
+                    guard moveArmedReservationId == r.id else { return }
+
                     applyTimeShift(for: r, dragX: value.translation.width)
                     moveReservationVertically(for: r, dragY: value.translation.height)
 
                     draggingReservationId = nil
                     dragOffsetX = 0
                     dragOffsetY = 0
+                    moveArmedReservationId = nil
                 }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(moveArmedReservationId == r.id ? 0.9 : 0.0), lineWidth: 2)
         )
     }
 
@@ -427,7 +471,6 @@ struct TimelineView: View {
     // MARK: - 時間変更（15分刻み）
 
     private func applyTimeShift(for r: ReservationEntity, dragX: CGFloat) {
-        // 横方向のドラッグ量を 15 分刻みにスナップ
         let rawMinutes = Double(dragX / hourWidth * 60)
         let step = 15.0
         let snappedMinutes = Int((rawMinutes / step).rounded() * step)
@@ -452,13 +495,10 @@ struct TimelineView: View {
 
     // MARK: - 縦移動で卓を変更
 
-    /// 縦方向のドラッグ量に応じて、予約の卓を上下の卓へ移動する
     private func moveReservationVertically(for r: ReservationEntity, dragY: CGFloat) {
         guard !tables.isEmpty else { return }
 
-        // 行のピッチ ≒ rowHeight とみなす
         let rowPitch: CGFloat = rowHeight
-
         let rawRows = dragY / rowPitch
         let deltaIndex = Int(rawRows.rounded())
 
